@@ -168,6 +168,9 @@ class PBXFileReference(PBXType):
         '.rtf': ('text.rtf', 'PBXResourcesBuildPhase'),
         '.tiff': ('image.tiff', 'PBXResourcesBuildPhase'),
         '.txt': ('text', 'PBXResourcesBuildPhase'),
+        '.ttf': ('file', 'PBXResourcesBuildPhase'),
+        '.ttc': ('file', 'PBXResourcesBuildPhase'),    
+        '.otf': ('file', 'PBXResourcesBuildPhase'),    
         '.xcodeproj': ('wrapper.pb-project', None),
         '.xib': ('file.xib', 'PBXResourcesBuildPhase'),
         '.strings': ('text.plist.strings', 'PBXResourcesBuildPhase'),
@@ -530,6 +533,20 @@ class XCBuildConfiguration(PBXType):
 
         return modified
 
+    def set_build_setting(self, name, value):
+        base = 'buildSettings'
+
+        if not self.has_key(base):
+            self[base] = PBXDict()
+
+        self[base][name] = value;
+
+    def del_build_setting(self, name):
+        base = 'buildSettings'
+
+        if self.has_key(base):
+            if self[base].has_key(name):
+                del self[base][name]
 
 class XCConfigurationList(PBXType):
     pass
@@ -890,6 +907,96 @@ class XcodeProject(PBXDict):
     def move_file(self, id, dest_grp=None):
         pass
 
+    def get_project(self):
+        for key in self.objects:
+            obj = self.objects.get(key)
+            if obj.get('isa') == 'PBXProject':
+                return obj
+
+        return None
+
+    def remove_native_build_target(self, name):
+        native_target_guid_to_remove = None
+        native_target_to_remove = None
+        for key in self.objects:
+            obj = self.objects.get(key)
+            if obj.get('isa') == 'PBXNativeTarget' and obj.get('name') == name:
+                #print "Found native target to delete " + key
+                native_target_guid_to_remove = key;
+                native_target_to_remove = obj;
+
+        if not native_target_to_remove:
+            print 'ERROR: could not find native target named ' + name
+            return
+
+        build_configuration_list_guid = native_target_to_remove.get('buildConfigurationList')
+        build_configuration_list = self.objects.get(build_configuration_list_guid)
+        build_configuration_guids = build_configuration_list.get('buildConfigurations')
+        for guid in build_configuration_guids:
+            #print "Removing build configuration " + guid
+            self.objects.remove(guid)
+
+        #print "Removing build configuration list " + build_configuration_list_guid
+        self.objects.remove(build_configuration_list_guid)
+
+        build_phase_guids = native_target_to_remove.get('buildPhases')
+        for guid in build_phase_guids:
+            build_phase = self.objects.get(guid)
+            self.remove_file_references_for_build_phase(build_phase)
+            #print "Removing build phase " + guid
+            self.objects.remove(guid)
+
+        product_reference_guid = native_target_to_remove.get('productReference')
+        for key in self.objects:
+            obj = self.objects.get(key)
+            if obj.get('isa') == 'PBXGroup':
+                #print "Removing product reference from group " + key
+                obj.remove_child(product_reference_guid)
+        #print "Removing product reference " + product_reference_guid
+        self.objects.remove(product_reference_guid)
+
+        project = self.get_project()
+        if project:
+            #print "Removing native target from project targets " + native_target_guid_to_remove
+            project.get('targets').remove(native_target_guid_to_remove)
+
+        #print "Removing native target " + native_target_guid_to_remove
+        self.objects.remove(native_target_guid_to_remove)
+
+    def get_project_build_configuration(self, config_name):
+        project = self.get_project();
+        if project:
+            build_configuration_list_guid = project.get("buildConfigurationList")
+            return self.get_build_configuration(build_configuration_list_guid, config_name)
+
+        return None
+
+    def get_target_build_configuration(self, target_name, config_name):
+        for key in self.objects:
+            obj = self.objects.get(key)
+            if obj.get('isa') == 'PBXNativeTarget' and obj.get('name') == target_name:
+                build_configuration_list_guid = obj.get("buildConfigurationList")
+                return self.get_build_configuration(build_configuration_list_guid, config_name)
+
+        return None
+
+    def get_build_configuration(self, build_configuration_list_guid, config_name):
+        build_configuration_list = self.objects.get(build_configuration_list_guid)
+        if build_configuration_list.get('isa') == 'XCConfigurationList':
+            build_configuration_guids = build_configuration_list.get("buildConfigurations")
+            for guid in build_configuration_guids:
+                build_configuration = self.objects.get(guid)
+                if build_configuration.get('isa') == 'XCBuildConfiguration' and build_configuration.get('name') == config_name:
+                    return build_configuration
+
+        return None
+
+    def remove_file_references_for_build_phase(self, build_phase):
+        file_guids = build_phase.get('files')
+        for guid in file_guids:
+            #print "Removing file reference " + guid
+            self.objects.remove(guid)
+
     def apply_patch(self, patch_path, xcode_path):
         if not os.path.isfile(patch_path) or not os.path.isdir(xcode_path):
             print 'ERROR: couldn\'t apply "%s" to "%s"' % (patch_path, xcode_path)
@@ -897,12 +1004,11 @@ class XcodeProject(PBXDict):
 
         print 'applying "%s" to "%s"' % (patch_path, xcode_path)
 
-        return subprocess.call(['patch', '-p1', '--forward', '--directory=%s' % xcode_path, '--input=%s' % patch_path])
+        return subprocess.call(['patch', '-p1', '--forward', '--directory=%s'%xcode_path, '--input=%s'%patch_path])
 
-    def apply_mods(self, mod_dict, default_path=None):
-        if not default_path:
-            default_path = os.getcwd()
-
+    def apply_mods(self, mod_dict, mod_path):
+        pbxproj_path_parent_path = os.path.normpath(os.path.join(os.path.dirname(self.pbxproj_path), ".."))
+        
         keys = mod_dict.keys()
 
         for k in keys:
@@ -920,12 +1026,18 @@ class XcodeProject(PBXDict):
             excludes = [re.compile(e) for e in excludes]
 
         compiler_flags = mod_dict.pop('compiler_flags', {})
+        
+        # Extract all zips into Xcode project parent folder.
+        zips = mod_dict.pop('zips', [])
+        for z in zips:
+            cmd = "unzip -o -qq " + os.path.join(mod_path, z) + ' -d "' + pbxproj_path_parent_path + '"'
+            os.system(cmd)
 
-        for k, v in mod_dict.items():
+        for k,v in mod_dict.items():
             if k == 'patches':
                 for p in v:
                     if not os.path.isabs(p):
-                        p = os.path.join(default_path, p)
+                        p = os.path.join(mod_path, p)
 
                     self.apply_patch(p, self.source_root)
             elif k == 'folders':
@@ -943,9 +1055,12 @@ class XcodeProject(PBXDict):
                     if os.path.isabs(folder) and os.path.isdir(folder):
                         pass
                     else:
-                        folder = os.path.join(default_path, folder)
-                        if not os.path.isdir(folder):
-                            continue
+                        abs_folder = os.path.join(mod_path, folder)
+                        if not os.path.isdir(abs_folder):
+                            abs_folder = os.path.join(pbxproj_path_parent_path, folder)
+                            if not os.path.isdir(abs_folder):
+                                continue
+                        folder = abs_folder
 
                     if parent:
                         kwds['parent'] = parent
@@ -962,7 +1077,9 @@ class XcodeProject(PBXDict):
                         p = os.path.split(p)[0]
 
                     if not os.path.isabs(p):
-                        p = os.path.join(default_path, p)
+                        p = os.path.join(mod_path, p)
+                        if not os.path.exists(p):
+                            p = os.path.join(pbxproj_path_parent_path, p)
 
                     if not os.path.exists(p):
                         continue
@@ -991,10 +1108,10 @@ class XcodeProject(PBXDict):
                         if 'weak' in args:
                             kwds['weak'] = True
 
-                    file_path = os.path.join(default_path, p)
+                    file_path = os.path.normpath(os.path.join(mod_path, p))
                     search_path, file_name = os.path.split(file_path)
 
-                    if [m for m in excludes if re.match(m, file_name)]:
+                    if [m for m in excludes if re.match(m,file_name)]:
                         continue
 
                     try:
@@ -1006,12 +1123,13 @@ class XcodeProject(PBXDict):
                         file_list = os.listdir(search_path)
 
                         for f in file_list:
-                            if [m for m in excludes if re.match(m, f)]:
+                            innerKwds = dict(kwds) # Make sure we do not use the same kwds instance for all files detected by re search in file_list
+                            if [m for m in excludes if re.match(m,f)]:
                                 continue
 
-                            if re.search(expr, f):
-                                kwds['name'] = f
-                                paths[os.path.join(search_path, f)] = kwds
+                            if re.search(expr,f):
+                                innerKwds['name'] = f
+                                paths[os.path.join(search_path, f)] = innerKwds
                                 p = None
 
                     if k == 'libs':
@@ -1106,7 +1224,7 @@ class XcodeProject(PBXDict):
                 uuids[key] = objs.get(key).get('path')
             else:
                 if objs.get(key).get('isa') == 'PBXProject':
-                    uuids[objs.get(key).get('buildConfigurationList')] = 'Build configuration list for PBXProject "Unity-iPhone"'
+                    uuids[objs.get(key).get('buildConfigurationList')] = 'Build configuration list for PBXProject "%s"' % os.path.basename(file_name)
                 elif objs.get(key).get('isa')[0:3] == 'PBX':
                     uuids[key] = objs.get(key).get('isa')[3:-10]
                 else:
