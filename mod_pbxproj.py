@@ -164,7 +164,10 @@ class PBXFileReference(PBXType):
         '.nib': ('wrapper.nib', 'PBXResourcesBuildPhase'),
         '.plist': ('text.plist.xml', 'PBXResourcesBuildPhase'),
         '.json': ('text.json', 'PBXResourcesBuildPhase'),
+        '.js': ('sourcecode.javascript', 'PBXResourcesBuildPhase'),
         '.png': ('image.png', 'PBXResourcesBuildPhase'),
+        '.jpg': ('image.jpeg', 'PBXResourcesBuildPhase'),
+        '.pdf': ('image.pdf', 'PBXResourcesBuildPhase'),
         '.rtf': ('text.rtf', 'PBXResourcesBuildPhase'),
         '.tiff': ('image.tiff', 'PBXResourcesBuildPhase'),
         '.txt': ('text', 'PBXResourcesBuildPhase'),
@@ -554,7 +557,7 @@ class XCConfigurationList(PBXType):
 
 class XcodeProject(PBXDict):
     plutil_path = 'plutil'
-    special_folders = ['.bundle', '.framework', '.xcodeproj']
+    special_folders = ['.bundle', '.framework', '.xcodeproj', '.nib']
 
     def __init__(self, d=None, path=None):
         if not path:
@@ -640,14 +643,25 @@ class XcodeProject(PBXDict):
 
         return files
 
-    def get_files_by_name(self, name, parent=None):
+    def get_files_by_path(self, path, parent=None):
         if parent:
             files = [f for f in self.objects.values() if f.get('isa') == 'PBXFileReference'
-                                                         and f.get(name) == name
+                                                         and f.get('path') == path
                                                          and parent.has_child(f)]
         else:
             files = [f for f in self.objects.values() if f.get('isa') == 'PBXFileReference'
-                                                         and f.get(name) == name]
+                                                         and f.get('path') == path]
+
+        return files
+
+    def get_files_by_name(self, name, parent=None):
+        if parent:
+            files = [f for f in self.objects.values() if f.get('isa') == 'PBXFileReference'
+                                                         and f.get('name') == name
+                                                         and parent.has_child(f)]
+        else:
+            files = [f for f in self.objects.values() if f.get('isa') == 'PBXFileReference'
+                                                         and f.get('name') == name]
 
         return files
 
@@ -1040,6 +1054,11 @@ class XcodeProject(PBXDict):
                         p = os.path.join(mod_path, p)
 
                     self.apply_patch(p, self.source_root)
+            elif k == 'build_settings':
+                for config, build_settings in v.items():
+                    for setting, value in build_settings.items():
+                        project_build_config = self.get_project_build_configuration(config)
+                        project_build_config.set_build_setting(setting, value)
             elif k == 'folders':
                 # get and compile excludes list
                 # do each folder individually
