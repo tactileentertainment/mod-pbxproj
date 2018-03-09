@@ -305,7 +305,7 @@ class PBXGroup(PBXType):
 
         isa = ref.get('isa')
 
-        if isa != 'PBXFileReference' and isa != 'PBXGroup':
+        if isa != 'PBXFileReference' and isa != 'PBXGroup' and isa != 'PBXVariantGroup':
             return None
 
         if 'children' not in self:
@@ -372,13 +372,74 @@ class PBXReferenceProxy(PBXType):
 
 
 class PBXVariantGroup(PBXType):
-    pass
+    def add_child(self, ref):
+        if not isinstance(ref, PBXDict):
+            return None
+
+        isa = ref.get('isa')
+
+        if isa != 'PBXFileReference':
+            return None
+
+        if 'children' not in self:
+            self['children'] = PBXList()
+
+        self['children'].add(ref.id)
+
+        return ref.id
+
+    def remove_child(self, id):
+        if 'children' not in self:
+            self['children'] = PBXList()
+            return
+
+        if not PBXType.IsGuid(id):
+            id = id.id
+
+        self['children'].remove(id)
+
+    def has_child(self, id):
+        if 'children' not in self:
+            self['children'] = PBXList()
+            return False
+
+        if not PBXType.IsGuid(id):
+            id = id.id
+
+        return id in self['children']
+
+    def get_name(self):
+        path_name = os.path.split(self.get('path', ''))[1]
+        return self.get('name', path_name)
+
+    @classmethod
+    def Create(cls, name, path=None, tree='SOURCE_ROOT'):
+        grp = cls()
+        grp.id = cls.GenerateId()
+        grp['name'] = name
+        grp['children'] = PBXList()
+
+        if path:
+            grp['path'] = path
+            grp['sourceTree'] = tree
+        else:
+            grp['sourceTree'] = '<group>'
+
+        return grp
 
 
 class PBXTargetDependency(PBXType):
     pass
 
 
+class PBXAggregateTarget(PBXType):
+        pass
+        
+        
+class PBXHeadersBuildPhase(PBXType):
+        pass
+        
+        
 class PBXBuildPhase(PBXType):
     def add_build_file(self, bf):
         if bf.get('isa') != 'PBXBuildFile':
@@ -457,14 +518,14 @@ class XCBuildConfiguration(PBXType):
 
         return modified
 
-    def add_header_search_paths(self, paths, recursive=True):
-        return self.add_search_paths(paths, 'buildSettings', 'HEADER_SEARCH_PATHS', recursive=recursive)
+    def add_header_search_paths(self, paths, recursive=True, escape=True):
+        return self.add_search_paths(paths, 'buildSettings', 'HEADER_SEARCH_PATHS', recursive=recursive, escape=escape)
 
-    def add_library_search_paths(self, paths, recursive=True):
-        return self.add_search_paths(paths, 'buildSettings', 'LIBRARY_SEARCH_PATHS', recursive=recursive)
+    def add_library_search_paths(self, paths, recursive=True, escape=True):
+        return self.add_search_paths(paths, 'buildSettings', 'LIBRARY_SEARCH_PATHS', recursive=recursive, escape=escape)
 
-    def add_framework_search_paths(self, paths, recursive=True):
-        return self.add_search_paths(paths, 'buildSettings', 'FRAMEWORK_SEARCH_PATHS', recursive=recursive)
+    def add_framework_search_paths(self, paths, recursive=True, escape=True):
+        return self.add_search_paths(paths, 'buildSettings', 'FRAMEWORK_SEARCH_PATHS', recursive=recursive, escape=escape)
 
     def add_other_cflags(self, flags):
         modified = False
@@ -607,25 +668,25 @@ class XcodeProject(PBXDict):
             if b.remove_other_ldflags(flags):
                 self.modified = True
 
-    def add_header_search_paths(self, paths, recursive=True):
+    def add_header_search_paths(self, paths, recursive=True, escape=True):
         build_configs = [b for b in self.objects.values() if b.get('isa') == 'XCBuildConfiguration']
 
         for b in build_configs:
-            if b.add_header_search_paths(paths, recursive):
+            if b.add_header_search_paths(paths, recursive, escape):
                 self.modified = True
 
-    def add_framework_search_paths(self, paths, recursive=True):
+    def add_framework_search_paths(self, paths, recursive=True, escape=True):
         build_configs = [b for b in self.objects.values() if b.get('isa') == 'XCBuildConfiguration']
 
         for b in build_configs:
-            if b.add_framework_search_paths(paths, recursive):
+            if b.add_framework_search_paths(paths, recursive, escape):
                 self.modified = True
 
-    def add_library_search_paths(self, paths, recursive=True):
+    def add_library_search_paths(self, paths, recursive=True, escape=True):
         build_configs = [b for b in self.objects.values() if b.get('isa') == 'XCBuildConfiguration']
 
         for b in build_configs:
-            if b.add_library_search_paths(paths, recursive):
+            if b.add_library_search_paths(paths, recursive, escape):
                 self.modified = True
 
                 # TODO: need to return value if project has been modified
@@ -673,11 +734,11 @@ class XcodeProject(PBXDict):
 
     def get_groups_by_name(self, name, parent=None):
         if parent:
-            groups = [g for g in self.objects.values() if g.get('isa') == 'PBXGroup'
+            groups = [g for g in self.objects.values() if (g.get('isa') == 'PBXGroup' or g.get('isa') == 'PBXVariantGroup')
                                                           and g.get_name() == name
                                                           and parent.has_child(g)]
         else:
-            groups = [g for g in self.objects.values() if g.get('isa') == 'PBXGroup'
+            groups = [g for g in self.objects.values() if (g.get('isa') == 'PBXGroup' or g.get('isa') == 'PBXVariantGroup')
                                                           and g.get_name() == name]
 
         return groups
@@ -699,6 +760,31 @@ class XcodeProject(PBXDict):
                 return grp
 
         grp = PBXGroup.Create(name, path)
+        parent.add_child(grp)
+
+        self.objects[grp.id] = grp
+
+        self.modified = True
+
+        return grp
+
+    def get_or_create_variant_group(self, name, path=None, parent=None):
+        if not name:
+            return None
+
+        if not parent:
+            parent = self.root_group
+        elif not isinstance(parent, PBXGroup):
+            # assume it's an id
+            parent = self.objects.get(parent, self.root_group)
+
+        groups = self.get_groups_by_name(name)
+
+        for grp in groups:
+            if parent.has_child(grp.id):
+                return grp
+
+        grp = PBXVariantGroup.Create(name, path)
         parent.add_child(grp)
 
         self.objects[grp.id] = grp
@@ -841,7 +927,7 @@ class XcodeProject(PBXDict):
 
         if not parent:
             parent = self.root_group
-        elif not isinstance(parent, PBXGroup):
+        elif not (isinstance(parent, PBXGroup) or isinstance(parent, PBXVariantGroup)):
             # assume it's an id
             parent = self.objects.get(parent, self.root_group)
 
@@ -869,7 +955,9 @@ class XcodeProject(PBXDict):
                         and not os.path.isfile(abs_path) \
                         and file_ref.build_phase == 'PBXFrameworksBuildPhase':
                 framework_path = os.path.join('$(SRCROOT)', os.path.split(f_path)[0])
-                self.add_framework_search_paths([framework_path, '$(inherited)'], recursive=False)
+                self.add_framework_search_paths([framework_path], recursive=False)
+                self.add_framework_search_paths(['$(inherited)'], recursive=False, escape=False)
+                
 
         for r in results:
             self.objects[r.id] = r
@@ -910,7 +998,7 @@ class XcodeProject(PBXDict):
             self.objects.remove(id)
 
             if recursive:
-                groups = [g for g in self.objects.values() if g.get('isa') == 'PBXGroup']
+                groups = [g for g in self.objects.values() if (g.get('isa') == 'PBXGroup' or g.get('isa') == 'PBXVariantGroup')]
 
                 for group in groups:
                     if id in group['children']:
@@ -928,6 +1016,14 @@ class XcodeProject(PBXDict):
                 return obj
 
         return None
+
+    def get_native_target(self, target_name):
+        for key in self.objects:
+            obj = self.objects.get(key)
+            if obj.get('isa') == 'PBXNativeTarget' and obj.get('name') == target_name:
+                return obj
+
+        return None  
 
     def remove_native_build_target(self, name):
         native_target_guid_to_remove = None
@@ -977,6 +1073,32 @@ class XcodeProject(PBXDict):
         #print "Removing native target " + native_target_guid_to_remove
         self.objects.remove(native_target_guid_to_remove)
 
+    def remove_project_build_configuration(self, name):
+        project_build_configuration = self.get_project_build_configuration(name)
+        self.objects.remove(project_build_configuration.id)
+
+        project = self.get_project()
+        if project:
+            build_configuration_list_guid = project.get("buildConfigurationList")
+            if build_configuration_list_guid:
+                self.remove_build_configuration_from_build_configuration_list(build_configuration_list_guid, project_build_configuration.id)
+
+    def remove_native_target_build_configuration(self, target_name, config_name):
+        target_build_configuration = self.get_native_target_build_configuration(target_name, config_name)
+        self.objects.remove(target_build_configuration.id)
+
+        target = self.get_native_target(target_name)
+        if target:
+            build_configuration_list_guid = target.get("buildConfigurationList")
+            if build_configuration_list_guid:
+                self.remove_build_configuration_from_build_configuration_list(build_configuration_list_guid, target_build_configuration.id)
+
+    def remove_build_configuration_from_build_configuration_list(self, build_configuration_list_guid, build_configuration_guid):
+        build_configuration_list = self.objects.get(build_configuration_list_guid)
+        if build_configuration_list.get('isa') == 'XCConfigurationList':
+            build_configuration_guids = build_configuration_list.get("buildConfigurations")
+            build_configuration_guids.remove(build_configuration_guid)
+
     def get_project_build_configuration(self, config_name):
         project = self.get_project();
         if project:
@@ -985,14 +1107,13 @@ class XcodeProject(PBXDict):
 
         return None
 
-    def get_target_build_configuration(self, target_name, config_name):
-        for key in self.objects:
-            obj = self.objects.get(key)
-            if obj.get('isa') == 'PBXNativeTarget' and obj.get('name') == target_name:
-                build_configuration_list_guid = obj.get("buildConfigurationList")
-                return self.get_build_configuration(build_configuration_list_guid, config_name)
-
-        return None
+    def get_native_target_build_configuration(self, target_name, config_name):
+        target = self.get_native_target(target_name)
+        if target:
+            build_configuration_list_guid = target.get("buildConfigurationList")
+            return self.get_build_configuration(build_configuration_list_guid, config_name)
+                
+        return None  
 
     def get_build_configuration(self, build_configuration_list_guid, config_name):
         build_configuration_list = self.objects.get(build_configuration_list_guid)
@@ -1010,6 +1131,28 @@ class XcodeProject(PBXDict):
         for guid in file_guids:
             #print "Removing file reference " + guid
             self.objects.remove(guid)
+
+
+    def get_shell_script_build_phase(self, name):
+        for key in self.objects:
+            obj = self.objects.get(key)
+            if obj.get('isa') == 'PBXShellScriptBuildPhase' and obj.get('name') == name:
+                return obj
+
+        return None
+
+    def remove_shell_script_build_phase(self, name):
+        build_phase = self.get_shell_script_build_phase(name)
+        if build_phase:
+            # Remove script from build phases in all native targets
+            for key in self.objects:
+                obj = self.objects.get(key)
+                if obj.get('isa') == 'PBXNativeTarget':
+                    build_phase_guids = obj.get('buildPhases')
+                    build_phase_guids.remove(build_phase.id)
+
+            # Remove the build phase object
+            self.objects.remove(build_phase.id)
 
     def apply_patch(self, patch_path, xcode_path):
         if not os.path.isfile(patch_path) or not os.path.isdir(xcode_path):
@@ -1250,7 +1393,7 @@ class XcodeProject(PBXDict):
                     uuids[key] = 'Build configuration list for PBXNativeTarget "TARGET_NAME"'
 
         ro = self.data.get('rootObject')
-        uuids[ro] = 'Project Object'
+        uuids[ro] = 'Project object'
 
         for key in objs:
             # transitive references (used in the BuildFile section)
@@ -1318,6 +1461,7 @@ class XcodeProject(PBXDict):
                         ('PBXFileReference', False),
                         ('PBXFrameworksBuildPhase', True),
                         ('PBXGroup', True),
+                        ('PBXAggregateTarget', True),
                         ('PBXNativeTarget', True),
                         ('PBXProject', True),
                         ('PBXResourcesBuildPhase', True),
